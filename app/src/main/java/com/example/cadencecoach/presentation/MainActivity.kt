@@ -1,8 +1,20 @@
 package com.example.cadencecoach.presentation
+
 import android.os.Bundle
-import androidx.activity.ComponentActivity
 import android.os.Handler
 import android.os.Looper
+
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+
+import androidx.compose.runtime.*
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextAlign
+
+import androidx.wear.compose.material.*
 
 /**
  * This is the entry point of the WearOs app
@@ -27,6 +39,10 @@ class MainActivity : ComponentActivity() {
 
     //Flag to check if baseline is ready
     private var baselineCalculated = false
+
+    //UI state
+    private val uiText = mutableStateOf("Measuring baseline...")
+
     override fun onCreate(savedInstanceState: Bundle?)
     {
         super.onCreate(savedInstanceState)
@@ -44,6 +60,7 @@ class MainActivity : ComponentActivity() {
         handler.postDelayed({
             baselineCadence = cadenceSensor.cadence
             baselineCalculated = true
+            uiText.value="Cadence coaching active"
 
             //Start playing the beatat the baseline cadence
             audioManager.startBeat(baselineCadence)
@@ -81,6 +98,10 @@ class MainActivity : ComponentActivity() {
                 handler.postDelayed(this, 10_000)
             }
         }, 10_000)
+        //ui
+        setContent {
+            CadenceCoachUI(uiText.value)
+        }
     }
 
     /**
@@ -91,4 +112,18 @@ class MainActivity : ComponentActivity() {
         cadenceSensor.stop()
         audioManager.stopBeat()
     }
+}
+
+@Composable
+fun CadenceCoachUI(text:String){
+    MaterialTheme{
+        Box(modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center
+        ){
+            Text(text = text,
+                textAlign = TextAlign.Center
+            )
+        }
+    }
+
 }
