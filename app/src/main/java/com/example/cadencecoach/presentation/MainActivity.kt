@@ -15,6 +15,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
 
 import androidx.wear.compose.material.*
+import androidx.compose.foundation.background
+import androidx.compose.ui.graphics.Color
 
 /**
  * This is the entry point of the WearOs app
@@ -39,19 +41,41 @@ class MainActivity : ComponentActivity() {
 
     //Flag to check if baseline is ready
     private var baselineCalculated = false
+    //Tracks last cadence state to avoid repeated feedback
+    private var lastCadenceState = "INIT" //DOWN UP OK
+    private var lastCadence = 0
+    private var lastStateChangeTime = 0L
 
-    //UI state
-    private val uiText = mutableStateOf("Measuring baseline...")
+    //Detect recovery stability
+    private var stableStartTime = 0L
+    private val recoveryTimeMs = 5_000L //5 seconds
 
-    override fun onCreate(savedInstanceState: Bundle?)
-    {
+    private var lastMovementTime = 0L
+    private val stopThresholdCadence = 15 //steps per minute
+    private val stopTimeoutMs = 5_000L //5 seconds
+
+
+    override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // keep screen awake
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+
         //Initialize sensor and audio helpers
-        cadenceSensor= CadenceSensor(this)
+        cadenceSensor = CadenceSensor(this)
         audioManager = AudioManager(this)
 
         //Start measuring steps immediately
         cadenceSensor.start()
+
+        //UI
+        setContent {
+            CadenceCoachUI(
+                text = if (!baselineCalculated)
+                    "Measuring cadence"
+                else
+                    "Cadence Coach active"
+            )
+        }
 
         /**
          * first step is the baseline measurement
@@ -60,49 +84,86 @@ class MainActivity : ComponentActivity() {
         handler.postDelayed({
             baselineCadence = cadenceSensor.cadence
             baselineCalculated = true
-            uiText.value="Cadence coaching active"
+            lastCadence = baselineCadence
 
             //Start playing the beatat the baseline cadence
             audioManager.startBeat(baselineCadence)
-        },60_000) //60seconds
-
+            startCadenceMonitoring()
+        }, 30_000) //after 30seconds
+    }
         /**
          * the second step is to continuously monitor the cadence
          * every 10 seconds we compare the current cadence to baseline
          * and give audio feedback if it is too low or too high
          */
-        handler.postDelayed(object: Runnable {
-            override fun run(){
-                if(baselineCalculated)
-                {
-                    val currentCadence = cadenceSensor.cadence
 
-                    //Allow small tolerance (+-5%)
+        private fun startCadenceMonitoring(){
+        handler.post(object: Runnable {
+            override fun run(){
+                val currentCadence = cadenceSensor.cadence
+                val now = System.currentTimeMillis()
+                val delta = currentCadence - lastCadence
+                val dropDelta = -5 //sudden drop
+                val riseDelta = 5 //sudden rise
+
+                if(currentCadence >= stopThresholdCadence) {
+                    lastMovementTime = now
+                }
+
+                if(lastMovementTime != 0L && now - lastMovementTime >= stopTimeoutMs){
+                    audioManager.stopBeat()
+                    lastCadenceState = "STOP"
+                    stableStartTime = 0L
+                }
+
+                if(baselineCalculated && currentCadence >= stopThresholdCadence)
+                {
+                    //Allow small tolerance (+-5%) speeding up happens fast, slowing down happens gradually
                     val lowerThreshold = (baselineCadence * 0.95).toInt()
                     val upperThreshold = (baselineCadence * 1.05).toInt()
 
-                    when{
-                        currentCadence < lowerThreshold -> {
-                            //Runner is slowing down
+                when {
+                    //too fast
+                    currentCadence > upperThreshold || delta >= riseDelta -> {
+                        //Runner is speeding up
+                        if(lastCadenceState != "UP") {
+                            audioManager.playCadenceUp()
+                            lastCadenceState = "UP"
+                            stableStartTime = 0L
+                        }
+                    }
+
+                    //TOO SLOW
+                    currentCadence < lowerThreshold || delta <= dropDelta -> {
+                        //Runner is slowing down
+                        if(lastCadenceState != "DOWN") {
                             audioManager.playCadenceDown()
+                            lastCadenceState = "DOWN"
+                            stableStartTime = 0L
                         }
 
-                        currentCadence > upperThreshold -> {
-                            //Runner is speeding up
-                            audioManager.playCadenceUp()
+                    }
+
+                    else -> {
+
+                        if( stableStartTime == 0L)
+                        {
+                            stableStartTime = now
                         }
-                        //if cadence within range, no extra feedback for now
+                        if(now - stableStartTime >= recoveryTimeMs && lastCadenceState != "OK")
+                        {
+                            audioManager.playCadenceRecovered()
+                            lastCadenceState = "OK"
+                        }
                     }
                 }
-                //Run this check again after 10 seconds
-                handler.postDelayed(this, 10_000)
-            }
-        }, 10_000)
-        //ui
-        setContent {
-            CadenceCoachUI(uiText.value)
+                }
+                lastCadence = currentCadence
+            //Run this check again after 2 seconds
+            handler.postDelayed(this, 2_000)
         }
-    }
+    })
+}
 
     /**
      * Clean up when the app is closed
@@ -111,17 +172,22 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
         cadenceSensor.stop()
         audioManager.stopBeat()
+        handler.removeCallbacksAndMessages(null)
     }
 }
 
 @Composable
 fun CadenceCoachUI(text:String){
     MaterialTheme{
-        Box(modifier = Modifier.fillMaxSize(),
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color(0xFF0B1C2D)), //DARK BLUE
             contentAlignment = Alignment.Center
         ){
             Text(text = text,
-                textAlign = TextAlign.Center
+                textAlign = TextAlign.Center,
+                color = Color.White
             )
         }
     }

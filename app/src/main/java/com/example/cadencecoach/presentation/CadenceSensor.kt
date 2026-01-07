@@ -10,8 +10,6 @@ import kotlin.random.Random
 /**
  * Uses the STEP_DETECTOR sensor to count steps
  * Cadence = steps per minute
- * Test_mode = true -> fake cadence (emulator)
- * Test_mode = false -> real cadence(watch)
  */
 class CadenceSensor(context: Context): SensorEventListener {
 
