@@ -3,7 +3,7 @@ package com.example.cadencecoach.presentation
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 
@@ -18,156 +18,171 @@ import androidx.wear.compose.material.*
 import androidx.compose.foundation.background
 import androidx.compose.ui.graphics.Color
 
+import java.util.UUID
+
 /**
- * This is the entry point of the WearOs app
- * We dont show a user interface
- * the app runs in the background and
+ * Entry point of the Wear OS app
  * - measures cadence
- * - sets a baseline
- * - plays beats and feedback sounds
+ * - sets baseline
+ * - plays beats and feedback
+ * - logs everything to CSV
  */
 class MainActivity : ComponentActivity() {
-    //Object that measures steps and calculates cadence
-    private lateinit var cadenceSensor: CadenceSensor
 
-    //Object that plays beat and feedback sounds
+    // Cadence + audio
+    private lateinit var cadenceSensor: CadenceSensor
     private lateinit var audioManager: AudioManager
 
-    //Handler lets us run code after a delay or repeatedly
+    // CSV logger
+    private lateinit var csvLogger: CsvLogger
+
+    // Session info
+    private val sessionId = UUID.randomUUID().toString()
+    private var sessionStartTime = 0L
+
+    // Handler
     private val handler = Handler(Looper.getMainLooper())
 
-    //Baseline cadence (calculated after 1 min)
+    // Baseline
     private var baselineCadence = 0
-
-    //Flag to check if baseline is ready
     private var baselineCalculated = false
-    //Tracks last cadence state to avoid repeated feedback
-    private var lastCadenceState = "INIT" //DOWN UP OK
+
+    // Cadence state tracking
+    private var lastCadenceState = "INIT" // UP / DOWN / OK / STOP
     private var lastCadence = 0
-    private var lastStateChangeTime = 0L
-
-    //Detect recovery stability
     private var stableStartTime = 0L
-    private val recoveryTimeMs = 5_000L //5 seconds
 
+    // Recovery logic
+    private val recoveryTimeMs = 5_000L
+
+    // Stop detection
     private var lastMovementTime = 0L
-    private val stopThresholdCadence = 15 //steps per minute
-    private val stopTimeoutMs = 5_000L //5 seconds
-
+    private val stopThresholdCadence = 15
+    private val stopTimeoutMs = 5_000L
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // keep screen awake
-        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
-        //Initialize sensor and audio helpers
+        // Keep screen awake
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+
+        // Init helpers
         cadenceSensor = CadenceSensor(this)
         audioManager = AudioManager(this)
+        csvLogger = CsvLogger(this)
 
-        //Start measuring steps immediately
+        // Session start
+        sessionStartTime = System.currentTimeMillis()
+
         cadenceSensor.start()
 
-        //UI
+        // UI
         setContent {
             CadenceCoachUI(
                 text = if (!baselineCalculated)
-                    "Measuring cadence"
+                    "Measuring cadence..."
                 else
                     "Cadence Coach active"
             )
         }
 
         /**
-         * first step is the baseline measurement
-         * wait 60s, after that assume that the cadence reached is the runner's natural cadence
+         * BASELINE MEASUREMENT (30s)
          */
         handler.postDelayed({
             baselineCadence = cadenceSensor.cadence
             baselineCalculated = true
             lastCadence = baselineCadence
 
-            //Start playing the beatat the baseline cadence
             audioManager.startBeat(baselineCadence)
             startCadenceMonitoring()
-        }, 30_000) //after 30seconds
-    }
-        /**
-         * the second step is to continuously monitor the cadence
-         * every 10 seconds we compare the current cadence to baseline
-         * and give audio feedback if it is too low or too high
-         */
 
-        private fun startCadenceMonitoring(){
-        handler.post(object: Runnable {
-            override fun run(){
+        }, 30_000)
+    }
+
+    /**
+     * CONTINUOUS MONITORING
+     */
+    private fun startCadenceMonitoring() {
+        handler.post(object : Runnable {
+            override fun run() {
+
                 val currentCadence = cadenceSensor.cadence
                 val now = System.currentTimeMillis()
-                val delta = currentCadence - lastCadence
-                val dropDelta = -5 //sudden drop
-                val riseDelta = 5 //sudden rise
+                val elapsedSec = (now - sessionStartTime) / 1000
 
-                if(currentCadence >= stopThresholdCadence) {
+                val delta = currentCadence - lastCadence
+                val dropDelta = -5
+                val riseDelta = 5
+
+                // Detect movement
+                if (currentCadence >= stopThresholdCadence) {
                     lastMovementTime = now
                 }
 
-                if(lastMovementTime != 0L && now - lastMovementTime >= stopTimeoutMs){
+                // Detect stop
+                if (lastMovementTime != 0L && now - lastMovementTime >= stopTimeoutMs) {
                     audioManager.stopBeat()
                     lastCadenceState = "STOP"
                     stableStartTime = 0L
                 }
 
-                if(baselineCalculated && currentCadence >= stopThresholdCadence)
-                {
-                    //Allow small tolerance (+-5%) speeding up happens fast, slowing down happens gradually
+                if (baselineCalculated && currentCadence >= stopThresholdCadence) {
+
                     val lowerThreshold = (baselineCadence * 0.95).toInt()
                     val upperThreshold = (baselineCadence * 1.05).toInt()
 
-                when {
-                    //too fast
-                    currentCadence > upperThreshold || delta >= riseDelta -> {
-                        //Runner is speeding up
-                        if(lastCadenceState != "UP") {
-                            audioManager.playCadenceUp()
-                            lastCadenceState = "UP"
-                            stableStartTime = 0L
-                        }
-                    }
-
-                    //TOO SLOW
-                    currentCadence < lowerThreshold || delta <= dropDelta -> {
-                        //Runner is slowing down
-                        if(lastCadenceState != "DOWN") {
-                            audioManager.playCadenceDown()
-                            lastCadenceState = "DOWN"
-                            stableStartTime = 0L
+                    when {
+                        // SPEEDING UP
+                        currentCadence > upperThreshold || delta >= riseDelta -> {
+                            if (lastCadenceState != "UP") {
+                                audioManager.playCadenceUp()
+                                lastCadenceState = "UP"
+                                stableStartTime = 0L
+                            }
                         }
 
-                    }
-
-                    else -> {
-
-                        if( stableStartTime == 0L)
-                        {
-                            stableStartTime = now
+                        // SLOWING DOWN
+                        currentCadence < lowerThreshold || delta <= dropDelta -> {
+                            if (lastCadenceState != "DOWN") {
+                                audioManager.playCadenceDown()
+                                lastCadenceState = "DOWN"
+                                stableStartTime = 0L
+                            }
                         }
-                        if(now - stableStartTime >= recoveryTimeMs && lastCadenceState != "OK")
-                        {
-                            audioManager.playCadenceRecovered()
-                            lastCadenceState = "OK"
+
+                        // STABLE → RECOVERED
+                        else -> {
+                            if (stableStartTime == 0L) {
+                                stableStartTime = now
+                            }
+                            if (now - stableStartTime >= recoveryTimeMs &&
+                                lastCadenceState != "OK"
+                            ) {
+                                audioManager.playCadenceRecovered()
+                                lastCadenceState = "OK"
+                            }
                         }
                     }
                 }
-                }
+
+                // -------- CSV LOGGING (EVERY TICK) --------
+                csvLogger.log(
+                    sessionId = sessionId,
+                    elapsedTimeSec = elapsedSec,
+                    cadence = currentCadence,
+                    baselineCadence = baselineCadence,
+                    cadenceState = lastCadenceState
+                )
+                // -----------------------------------------
+
                 lastCadence = currentCadence
-            //Run this check again after 2 seconds
-            handler.postDelayed(this, 2_000)
-        }
-    })
-}
 
-    /**
-     * Clean up when the app is closed
-     */
+                handler.postDelayed(this, 2_000)
+            }
+        })
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         cadenceSensor.stop()
@@ -176,20 +191,23 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+/**
+ * SIMPLE UI
+ */
 @Composable
-fun CadenceCoachUI(text:String){
-    MaterialTheme{
+fun CadenceCoachUI(text: String) {
+    MaterialTheme {
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Color(0xFF0B1C2D)), //DARK BLUE
+                .background(Color(0xFF0B1C2D)), // dark blue
             contentAlignment = Alignment.Center
-        ){
-            Text(text = text,
+        ) {
+            Text(
+                text = text,
                 textAlign = TextAlign.Center,
                 color = Color.White
             )
         }
     }
-
 }
