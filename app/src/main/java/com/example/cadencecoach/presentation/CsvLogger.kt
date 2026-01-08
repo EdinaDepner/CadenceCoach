@@ -6,13 +6,11 @@ import java.io.FileWriter
 import java.text.SimpleDateFormat
 import java.util.*
 
-class CsvLogger(private val context: Context) {
+class CsvLogger(context: Context) {
 
-    private val fileName = "cadence_log.csv"
-    private val file: File = File(context.filesDir, fileName)
+    private val file = File(context.filesDir, "cadence_log.csv")
 
     init {
-        // Write header if file does not exist yet
         if (!file.exists()) {
             file.createNewFile()
             writeLine(
@@ -41,8 +39,8 @@ class CsvLogger(private val context: Context) {
     }
 
     private fun writeLine(line: String) {
-        FileWriter(file, true).use { writer ->
-            writer.append(line).append("\n")
+        FileWriter(file, true).use {
+            it.append(line).append("\n")
         }
     }
 }
