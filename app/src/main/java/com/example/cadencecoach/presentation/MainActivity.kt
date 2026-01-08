@@ -9,170 +9,154 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.wear.compose.material.Button
+import androidx.wear.compose.material.ButtonDefaults
 import androidx.wear.compose.material.MaterialTheme
 import androidx.wear.compose.material.Text
 import java.util.UUID
 
-/**
- * MainActivity
- * ------------
- * This is the main entry point of the Wear OS app.
- * It controls:
- * - cadence measurement
- * - baseline calculation
- * - audio feedback
- * - CSV logging
- * - basic UI state
- */
 class MainActivity : ComponentActivity() {
 
-    // Measures steps and calculates cadence (steps per minute)
     private lateinit var cadenceSensor: CadenceSensor
-
-    // Plays the beat and feedback sounds
     private lateinit var audioManager: AudioManager
-
-    // Logs all data to a CSV file
     private lateinit var csvLogger: CsvLogger
 
-    // Handler used to run repeated tasks with a delay (on main thread)
     private val handler = Handler(Looper.getMainLooper())
 
-    // --- Runtime (non-UI) state ---
-
-    // The baseline cadence calculated during calibration
+    // Run Logic State
     private var baselineCadence = 0
-
-    // Last measured cadence value
-    private var lastCadence = 0
-
-    // Keeps track of the last cadence state (UP / DOWN / OK)
     private var lastCadenceState = "INIT"
-
-    // Unique ID for this run session
     private var sessionId = ""
-
-    // Timestamp when the run started
     private var sessionStartTime = 0L
+    private var stableStartTime = 0L
+    private val recoveryDelayMs = 5_000L
 
-    // --- UI state (Compose state) ---
-
-    // True when baseline has been calculated
+    // UI State
     private var baselineCalculated by mutableStateOf(false)
-
-    // True once the user presses START
     private var started by mutableStateOf(false)
+
+    // NEW: Participant ID State
+    private var participantId by mutableStateOf(1)
+    private var isIdConfirmed by mutableStateOf(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
-        // Prevent the watch screen from turning off during the run
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
-        // Initialize helper classes
         cadenceSensor = CadenceSensor(this)
         audioManager = AudioManager(this)
         csvLogger = CsvLogger(this)
-
-        // Generate a unique session ID for this run
         sessionId = UUID.randomUUID().toString()
 
-        // Set the UI using Jetpack Compose
         setContent {
             CadenceCoachUI(
+                participantId = participantId,
+                isIdConfirmed = isIdConfirmed,
                 baselineCalculated = baselineCalculated,
                 started = started,
-                onStart = { startRun() }
+                onIdChange = { newId -> participantId = newId },
+                onIdConfirm = { isIdConfirmed = true },
+                onStart = { startRun() },
+                onStop = { stopRun() }
             )
         }
     }
 
-    /**
-     * Called when the user presses START
-     * Starts cadence measurement and baseline calibration
-     */
     private fun startRun() {
-        // Prevent starting twice
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         if (started) return
 
         started = true
-
-        // Start reading cadence from sensors
         cadenceSensor.start()
-
-        // Store the time when the run starts
         sessionStartTime = System.currentTimeMillis()
 
-        // --- BASELINE PHASE (30 seconds) ---
+        // BASELINE (30 seconds)
         handler.postDelayed({
-
-            // Read cadence after 30s and store it as baseline
+            if (!started) return@postDelayed
             baselineCadence = cadenceSensor.cadence
             baselineCalculated = true
-            lastCadence = baselineCadence
-
-            // Start playing the beat at baseline cadence
+            lastCadenceState = "OK"
             audioManager.startBeat(baselineCadence)
 
-            // Log baseline information to CSV
+            // Log Baseline Set
             csvLogger.log(
+                participantId, // Pass ID
                 sessionId,
-                elapsedTimeSec = 0,
-                cadence = baselineCadence,
-                baselineCadence = baselineCadence,
-                cadenceState = "BASELINE_SET"
+                0,
+                baselineCadence,
+                baselineCadence,
+                "BASELINE_SET"
             )
 
-            // Start continuous cadence monitoring
             startMonitoring()
-
-        }, 30_000) // 30 seconds baseline duration
+        }, 30_000)
     }
 
-    /**
-     * Continuously checks cadence every 2 seconds
-     * Compares it to baseline and plays feedback if needed
-     */
+    private fun stopRun() {
+        started = false
+        baselineCalculated = false
+        isIdConfirmed = false // Reset so we can enter a new ID for the next person
+        lastCadenceState = "INIT"
+        stableStartTime = 0L
+
+        cadenceSensor.stop()
+        audioManager.stopBeat()
+        handler.removeCallbacksAndMessages(null)
+        sessionId = UUID.randomUUID().toString()
+    }
+
     private fun startMonitoring() {
         handler.post(object : Runnable {
             override fun run() {
+                if (!started) return
 
-                // Current time and elapsed time since start
                 val now = System.currentTimeMillis()
                 val elapsedSec = (now - sessionStartTime) / 1000
-
-                // Current cadence value
                 val currentCadence = cadenceSensor.cadence
-
-                // Define acceptable cadence range (+/- 5%)
                 val lower = (baselineCadence * 0.95).toInt()
                 val upper = (baselineCadence * 1.05).toInt()
 
-                // Determine current cadence state
-                val newState = when {
+                val detectedState = when {
                     currentCadence < lower -> "DOWN"
                     currentCadence > upper -> "UP"
                     else -> "OK"
                 }
 
-                // Only play feedback if state changed
-                if (newState != lastCadenceState) {
-                    when (newState) {
-                        "DOWN" -> audioManager.playCadenceDown()
-                        "UP" -> audioManager.playCadenceUp()
-                        "OK" -> audioManager.playCadenceRecovered()
+                // Audio Logic
+                when (detectedState) {
+                    "UP", "DOWN" -> {
+                        if (detectedState != lastCadenceState) {
+                            if (detectedState == "UP") audioManager.playCadenceUp()
+                            else audioManager.playCadenceDown()
+                            lastCadenceState = detectedState
+                        }
+                        stableStartTime = 0L
                     }
-                    lastCadenceState = newState
+                    "OK" -> {
+                        if ((lastCadenceState == "UP" || lastCadenceState == "DOWN")) {
+                            if (stableStartTime == 0L) {
+                                stableStartTime = now
+                            } else if (now - stableStartTime >= recoveryDelayMs) {
+                                audioManager.playCadenceRecovered()
+                                lastCadenceState = "OK"
+                                stableStartTime = 0L
+                            }
+                        }
+                    }
                 }
 
-                // Log current data to CSV
+                // Log with Participant ID
                 csvLogger.log(
+                    participantId,
                     sessionId,
                     elapsedSec,
                     currentCadence,
@@ -180,18 +164,11 @@ class MainActivity : ComponentActivity() {
                     lastCadenceState
                 )
 
-                // Store last cadence for next comparison
-                lastCadence = currentCadence
-
-                // Run again after 2 seconds
                 handler.postDelayed(this, 2_000)
             }
         })
     }
 
-    /**
-     * Cleanup when the app is closed
-     */
     override fun onDestroy() {
         super.onDestroy()
         cadenceSensor.stop()
@@ -200,52 +177,113 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-/* ---------------- UI ---------------- */
+/* ---------------- UPDATED UI ---------------- */
 
-/**
- * Simple Wear OS UI
- * Shows status text and a START button
- */
 @Composable
 fun CadenceCoachUI(
+    participantId: Int,
+    isIdConfirmed: Boolean,
     baselineCalculated: Boolean,
     started: Boolean,
-    onStart: () -> Unit
+    onIdChange: (Int) -> Unit,
+    onIdConfirm: () -> Unit,
+    onStart: () -> Unit,
+    onStop: () -> Unit
 ) {
     MaterialTheme {
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Color(0xFF0B1C2D)), // Dark blue background
+                .background(Color(0xFF0B1C2D)),
             contentAlignment = Alignment.Center
         ) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
 
-                // Status text depending on app state
-                Text(
-                    text = when {
-                        !started -> "Press START"
-                        !baselineCalculated -> "Measuring cadence…"
-                        else -> "Cadence Coach Active"
-                    },
-                    color = Color.White,
-                    textAlign = TextAlign.Center
-                )
+                // SCENE 1: Participant ID Selection
+                if (!isIdConfirmed) {
+                    Text("Participant ID", color = Color.Gray, fontSize = 12.sp)
+                    Spacer(modifier = Modifier.height(8.dp))
 
-                Spacer(modifier = Modifier.height(12.dp))
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        // Decrease Button
+                        Button(
+                            onClick = { if (participantId > 1) onIdChange(participantId - 1) },
+                            colors = ButtonDefaults.buttonColors(backgroundColor = Color.DarkGray),
+                            modifier = Modifier.size(40.dp)
+                        ) {
+                            Text("-", color = Color.White)
+                        }
 
-                // START button (only visible before starting)
-                if (!started) {
+                        Spacer(modifier = Modifier.width(16.dp))
+
+                        // ID Display
+                        Text(
+                            text = "$participantId",
+                            fontSize = 30.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+
+                        Spacer(modifier = Modifier.width(16.dp))
+
+                        // Increase Button
+                        Button(
+                            onClick = { onIdChange(participantId + 1) },
+                            colors = ButtonDefaults.buttonColors(backgroundColor = Color.DarkGray),
+                            modifier = Modifier.size(40.dp)
+                        ) {
+                            Text("+", color = Color.White)
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    // Confirm Button
                     Box(
                         modifier = Modifier
-                            .background(Color.DarkGray)
-                            .padding(horizontal = 12.dp, vertical = 6.dp)
-                            .clickable { onStart() }
+                            .background(Color(0xFF005085), CircleShape)
+                            .padding(horizontal = 20.dp, vertical = 10.dp)
+                            .clickable { onIdConfirm() }
                     ) {
-                        Text(
-                            text = "START",
-                            color = Color.Cyan
-                        )
+                        Text("CONFIRM", color = Color.White)
+                    }
+                }
+
+                // SCENE 2: Main Run UI (Only shown after ID is confirmed)
+                else {
+                    Text(
+                        text = when {
+                            !started -> "ID: $participantId\nPress START"
+                            !baselineCalculated -> "Measuring cadence…"
+                            else -> "Cadence Coach Active"
+                        },
+                        color = Color.White,
+                        textAlign = TextAlign.Center
+                    )
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    if (!started) {
+                        Box(
+                            modifier = Modifier
+                                .background(Color.DarkGray)
+                                .padding(horizontal = 12.dp, vertical = 6.dp)
+                                .clickable { onStart() }
+                        ) {
+                            Text("START", color = Color.Cyan)
+                        }
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .background(Color.DarkGray)
+                                .padding(horizontal = 12.dp, vertical = 6.dp)
+                                .clickable { onStop() }
+                        ) {
+                            Text("STOP", color = Color.Red)
+                        }
                     }
                 }
             }

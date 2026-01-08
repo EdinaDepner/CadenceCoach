@@ -8,19 +8,22 @@ import java.util.*
 
 class CsvLogger(context: Context) {
 
-    private val file = File(context.filesDir, "cadence_log.csv")
+    // Changed filename to ensure we don't mix old data format with new format
+    private val file = File(context.filesDir, "cadence_log_participants.csv")
 
     init {
         if (!file.exists()) {
             file.createNewFile()
+            // Updated Header with new columns
             writeLine(
-                "session_id,timestamp,elapsed_time_sec," +
-                        "cadence_spm,baseline_cadence,cadence_state"
+                "participant_id,session_id,timestamp,elapsed_time_sec," +
+                        "cadence_spm,baseline_cadence,cadence_deviation,cadence_state"
             )
         }
     }
 
     fun log(
+        participantId: Int,
         sessionId: String,
         elapsedTimeSec: Long,
         cadence: Int,
@@ -32,9 +35,13 @@ class CsvLogger(context: Context) {
             Locale.US
         ).format(Date())
 
+        // Calculate change in cadence (Deviation)
+        // e.g., if Baseline is 160 and Current is 165, deviation is +5
+        val deviation = cadence - baselineCadence
+
         writeLine(
-            "$sessionId,$timestamp,$elapsedTimeSec," +
-                    "$cadence,$baselineCadence,$cadenceState"
+            "$participantId,$sessionId,$timestamp,$elapsedTimeSec," +
+                    "$cadence,$baselineCadence,$deviation,$cadenceState"
         )
     }
 
